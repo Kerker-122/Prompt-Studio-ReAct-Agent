@@ -100,8 +100,8 @@ Conda、Python 3.10 或更高版本、名为 `Lang` 的 Conda 环境，以及阿
 ### 2. 克隆项目
 
 ```powershell
-git clone <你的 GitHub 仓库地址>
-cd LangChain-React
+git clone https://github.com/Kerker-122/Prompt-Studio-ReAct-Agent.git
+cd Prompt-Studio-ReAct-Agent
 ```
 
 ### 3. 安装依赖
