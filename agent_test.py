@@ -11,11 +11,15 @@ from deepeval.metrics import (
     ContextualRecallMetric,
     ContextualRelevancyMetric,
     FaithfulnessMetric,
+    GEval,
 )
 from deepeval.models import DeepEvalBaseLLM
-from deepeval.test_case import LLMTestCase
+from deepeval.test_case import LLMTestCase, SingleTurnParams
+import uuid
 import yaml
+from collections import Counter
 
+from agent.react_agent import ReactAgent
 from model.factory import Judge_Model
 from rag.rag_service import RagSummarizeService
 from utils.config_handler import rag_conf
@@ -48,13 +52,21 @@ class QwenJudgeModel(DeepEvalBaseLLM):
         return f"Qwen Judge: {rag_conf['judge_model_name']}"
 
 
-def load_test_cases():
-    """读取RAG测试集，并根据case_limit选择参与评测的用例数量。"""
+def load_test_cases(
+    evaluation_profile: str | None = None,
+):
+    """读取测试集，按类型过滤后再根据case_limit限制执行数量。"""
     test_cases_path = get_abs_path(eval_conf["dataset_path"])
     with open(test_cases_path, "r", encoding="utf-8") as f:
         test_cases_data = yaml.load(f, Loader=yaml.FullLoader)
 
     test_cases = test_cases_data["cases"]
+    if evaluation_profile is not None:
+        test_cases = [
+            case_data
+            for case_data in test_cases
+            if case_data.get("evaluation_profile") == evaluation_profile
+        ]
     case_limit = eval_conf.get("case_limit")
 
     if case_limit is None:
@@ -109,8 +121,33 @@ def create_rag_metrics(judge_model):
     ]
 
 
+def test_dataset_schema():
+    """离线校验100条测试数据的数量、分层和必填字段。"""
+    with open(get_abs_path(eval_conf["dataset_path"]), "r", encoding="utf-8") as f:
+        all_cases = yaml.load(f, Loader=yaml.FullLoader)["cases"]
+
+    assert len(all_cases) == 100
+    assert len({case_data["id"] for case_data in all_cases}) == 100
+    assert Counter(case_data["difficulty"] for case_data in all_cases) == {
+        "basic": 40,
+        "medium": 35,
+        "hard": 25,
+    }
+
+    for case_data in all_cases:
+        for field in (
+            "id", "name", "difficulty", "scenario",
+            "evaluation_profile", "expected_output",
+        ):
+            assert case_data.get(field) is not None, f"{case_data.get('id')}缺少{field}"
+        if case_data["evaluation_profile"] == "multi_turn_context":
+            assert len(case_data.get("turns", [])) >= 2
+        else:
+            assert "input" in case_data
+
+
 def print_rag_evaluation_results(test_results, test_cases_data):
-    """输出每条用例的分数，以及各指标和全部分数的平均值。"""
+    """只汇总标准RAG用例，避免与GEval分数混合。"""
     metric_scores = {}
     all_scores = []
 
@@ -147,8 +184,9 @@ def print_rag_evaluation_results(test_results, test_cases_data):
             )
 
     print("\n" + "=" * 70)
-    print("平均分汇总")
+    print("标准RAG评测平均分汇总（仅 rag_quality）")
     print("=" * 70)
+    print(f"执行用例数: {len(test_cases_data)}")
 
     for metric_name, scores in metric_scores.items():
         average_score = sum(scores) / len(scores)
@@ -157,12 +195,31 @@ def print_rag_evaluation_results(test_results, test_cases_data):
     if all_scores:
         overall_average = sum(all_scores) / len(all_scores)
         print("-" * 70)
-        print(f"五项指标总体平均分: {overall_average:.4f}")
+        print(f"标准RAG五项指标总体平均分: {overall_average:.4f}")
+
+
+def print_geval_summary(
+    title: str,
+    metric_name: str,
+    scores: list[float],
+    failed_cases: list[str],
+):
+    """单独汇总一类GEval结果，不与RAG五项指标计算共同平均分。"""
+    print("\n" + "=" * 70)
+    print(title)
+    print("=" * 70)
+    print(f"执行用例数: {len(scores)}")
+    print(f"通过用例数: {len(scores) - len(failed_cases)}")
+    print(f"失败用例数: {len(failed_cases)}")
+    if scores:
+        print(f"{metric_name}平均分: {sum(scores) / len(scores):.4f}")
+    if failed_cases:
+        print(f"失败用例: {', '.join(failed_cases)}")
 
 
 def test_rag_quality():
-    # 第一步：从YAML测试集中读取全部用例。
-    test_cases_data = load_test_cases()
+    # 第一步：只读取单轮RAG用例；多轮Agent用例由独立测试执行。
+    test_cases_data = load_test_cases("rag_quality")
 
     # 第二步：复用一个RAG服务，逐条完成真实检索和回答生成。
     rag_service = RagSummarizeService()
@@ -170,8 +227,14 @@ def test_rag_quality():
 
     for case_data in test_cases_data:
         query = case_data["input"]
-        retrieved_docs = rag_service.retriever_docs(query)
-        actual_output = rag_service.rag_summarize(query)
+        try:
+            retrieved_docs = rag_service.retriever_docs(query)
+            actual_output = rag_service.rag_summarize(query)
+        except Exception as error:
+            # 空输入等负向用例可能暴露当前实现的未处理异常。
+            # 将异常转成可评测结果，避免单条用例中断整个批次。
+            retrieved_docs = []
+            actual_output = f"系统处理异常：{type(error).__name__}: {error}"
 
         # DeepEval要求retrieval_context是字符串列表，
         # 因此把项目返回的Document列表转换成纯文本列表。
@@ -195,7 +258,7 @@ def test_rag_quality():
     judge_model = QwenJudgeModel()
     rag_metrics = create_rag_metrics(judge_model)
 
-    # 第四步：将10条用例一次性交给DeepEval官方evaluate函数。
+    # 第四步：将筛选出的用例一次性交给DeepEval官方evaluate函数。
     evaluation_result = evaluate(
         test_cases=rag_test_cases,
         metrics=rag_metrics,
@@ -228,3 +291,131 @@ def test_rag_quality():
         if not test_result.success
     ]
     assert not failed_cases, f"未通过的RAG用例：{', '.join(failed_cases)}"
+
+
+def test_boundary_behavior_quality():
+    """验证无效、越界、实时或诱导输入下的澄清、拒答与防编造行为。"""
+    test_cases_data = load_test_cases("boundary_behavior")
+    rag_service = RagSummarizeService()
+    judge_model = QwenJudgeModel()
+    metric = GEval(
+        name="Boundary and Hallucination Handling",
+        criteria=(
+            "判断回答是否正确处理空白或模糊输入、知识库无答案、实时信息和诱导编造："
+            "需要时应追问澄清，超出能力或资料范围时应明确边界并给出可靠查询建议，"
+            "不得伪造事实、实时数据、官方规则、知识库来源、评测结果或用户案例。"
+        ),
+        evaluation_params=[
+            SingleTurnParams.INPUT,
+            SingleTurnParams.ACTUAL_OUTPUT,
+            SingleTurnParams.EXPECTED_OUTPUT,
+        ],
+        model=judge_model,
+        threshold=eval_conf["thresholds"].get("boundary_behavior", 0.5),
+        async_mode=False,
+    )
+
+    print("\n" + "=" * 70)
+    print("GEval边界行为与防编造评测结果")
+    print("=" * 70)
+    failed_cases = []
+    scores = []
+    for case_data in test_cases_data:
+        try:
+            actual_output = rag_service.rag_summarize(case_data["input"])
+        except Exception as error:
+            actual_output = f"系统处理异常：{type(error).__name__}: {error}"
+
+        test_case = LLMTestCase(
+            input=case_data["input"] or "<空输入>",
+            actual_output=actual_output,
+            expected_output=case_data["expected_output"],
+        )
+        metric.measure(test_case)
+        score = float(metric.score)
+        scores.append(score)
+        print(
+            f"{case_data['id']} {case_data['name']}: "
+            f"{score:.4f} | 阈值={metric.threshold}"
+        )
+        if not metric.is_successful():
+            failed_cases.append(case_data["name"])
+
+    print_geval_summary(
+        "GEval边界行为平均分汇总（仅 boundary_behavior）",
+        "Boundary and Hallucination Handling",
+        scores,
+        failed_cases,
+    )
+
+    assert not failed_cases, (
+        "未通过的边界行为用例：" + ", ".join(failed_cases)
+    )
+
+
+def test_agent_multi_turn_quality():
+    """验证同一thread_id内的上下文继承，并隔离不同测试用例。"""
+    test_cases_data = load_test_cases("multi_turn_context")
+    judge_model = QwenJudgeModel()
+    metric = GEval(
+        name="Multi-turn Context Retention",
+        criteria=(
+            "根据完整对话记录，判断最终回答是否正确继承此前已经确定的人物、"
+            "场景、风格、平台或分镜约束，并准确执行最后一轮修改；"
+            "不得遗忘未要求修改的设定，也不得混入其他测试用例的信息。"
+        ),
+        evaluation_params=[
+            SingleTurnParams.INPUT,
+            SingleTurnParams.ACTUAL_OUTPUT,
+            SingleTurnParams.EXPECTED_OUTPUT,
+        ],
+        model=judge_model,
+        threshold=eval_conf["thresholds"].get("multi_turn_context", 0.5),
+        async_mode=False,
+    )
+
+    print("\n" + "=" * 70)
+    print("GEval多轮上下文保持评测结果")
+    print("=" * 70)
+    failed_cases = []
+    scores = []
+    for case_data in test_cases_data:
+        agent = ReactAgent()
+        # 一条用例只生成一次thread_id，所有轮次始终复用它。
+        # 下一条用例会创建新Agent和新thread_id，避免上下文相互污染。
+        thread_id = f"eval-{case_data['id']}-{uuid.uuid4().hex}"
+        dialogue = []
+        final_output = ""
+
+        for turn in case_data["turns"]:
+            dialogue.append(f"用户：{turn}")
+            final_output = "".join(
+                agent.execute_stream(turn, thread_id=thread_id)
+            ).strip()
+            dialogue.append(f"助手：{final_output}")
+
+        test_case = LLMTestCase(
+            input="\n".join(dialogue[:-1]),
+            actual_output=final_output,
+            expected_output=case_data["expected_output"],
+        )
+        metric.measure(test_case)
+        score = float(metric.score)
+        scores.append(score)
+        print(
+            f"{case_data['id']} {case_data['name']}: "
+            f"{score:.4f} | 阈值={metric.threshold}"
+        )
+        if not metric.is_successful():
+            failed_cases.append(case_data["name"])
+
+    print_geval_summary(
+        "GEval多轮上下文平均分汇总（仅 multi_turn_context）",
+        "Multi-turn Context Retention",
+        scores,
+        failed_cases,
+    )
+
+    assert not failed_cases, (
+        "未通过的多轮上下文用例：" + ", ".join(failed_cases)
+    )

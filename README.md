@@ -94,9 +94,25 @@
 | 运行环境 | Python、Conda |
 | 自动化评测 | DeepEval、Pytest、LLM-as-a-Judge |
 
-## RAG 质量评测
+## 100条分层自动化评测集
 
-项目使用 DeepEval 构建 RAG 离线自动化评测流程，并以 Qwen-Max 作为 LLM-as-a-Judge 裁判模型。测试脚本会调用真实的 ChromaDB 检索与 RAG 回答链路，再从检索质量和生成质量两个层面进行评价。
+项目基于 DeepEval、Pytest 和 Qwen-Max LLM-as-a-Judge 构建离线自动化评测体系。测试集位于 `data/test_cases.yml`，共包含100条用例，并按基础、中等和困难三个等级覆盖正常能力、复杂约束、多轮记忆、异常输入、知识边界与防幻觉行为。
+
+| 难度 | 数量 | 主要场景 |
+| --- | ---: | --- |
+| 基础 | 40 | 20条简单知识点检索、20条提示词补全 |
+| 中等 | 35 | 10条多条件、9条多知识点、8条多轮上下文、8条冲突约束 |
+| 困难 | 25 | 4条空输入、5条模糊问题、5条无答案、5条实时信息、6条诱导编造 |
+
+不同场景使用不同评价体系，三类分数分别统计，不计算跨体系的混合平均分：
+
+| evaluation_profile | 用例数 | 评价方式 | 输出结果 |
+| --- | ---: | --- | --- |
+| `rag_quality` | 67 | DeepEval五项RAG指标 | 各指标平均分、RAG五项总体平均分 |
+| `boundary_behavior` | 25 | GEval边界行为与防编造标准 | 单项分数、通过/失败数、GEval平均分 |
+| `multi_turn_context` | 8 | GEval多轮上下文保持标准 | 单项分数、通过/失败数、GEval平均分 |
+
+标准RAG用例会调用真实的ChromaDB检索与RAG回答链路，并分别评价检索质量和生成质量：
 
 | 指标 | 关注内容 |
 | --- | --- |
@@ -106,22 +122,38 @@
 | Contextual Precision | 有价值的召回文本是否排在较前位置 |
 | Contextual Recall | 召回文本是否覆盖标准答案的关键知识点 |
 
-测试集位于 `data/test_cases.yml`，包含 8 条基础用例和 2 条综合/边界用例。`config/eval.yml` 用于配置测试集路径、指标阈值和参与评测的用例数量：
+困难用例不机械套用Contextual Recall等检索指标，而是通过GEval判断系统能否正确澄清模糊输入、声明知识边界、拒绝实时信息臆测并抵抗诱导编造。多轮用例同样使用GEval，但评价标准切换为上下文继承与局部修改准确性；同一用例内所有轮次复用同一个`thread_id`，不同用例使用不同UUID进行会话隔离。
+
+`config/eval.yml`用于配置测试集路径、每种评价体系的执行数量和指标阈值：
 
 ```yaml
 dataset_path: data/test_cases.yml
 
-# 正整数表示只评测前N条；null表示评测全部用例。
-case_limit: null
+# 正整数表示每种evaluation_profile评测前N条；null表示全量评测。
+case_limit: 10
 ```
 
-运行评测：
+运行测试：
 
 ```powershell
+# 离线校验100条用例的总数、分层、ID和字段
+conda run --no-capture-output -n Lang python -m pytest -q agent_test.py -k dataset_schema -p no:cacheprovider
+
+# 标准RAG五指标评测
 conda run --no-capture-output -n Lang python -m pytest -q agent_test.py -k rag_quality -s -p no:cacheprovider
+
+# 空输入、模糊问题、无答案、实时信息与诱导编造评测
+conda run --no-capture-output -n Lang python -m pytest -q agent_test.py -k boundary_behavior_quality -s -p no:cacheprovider
+
+# 多轮上下文保持评测
+conda run --no-capture-output -n Lang python -m pytest -q agent_test.py -k agent_multi_turn_quality -s -p no:cacheprovider
 ```
 
-当前 10 条用例的完整评测结果如下。指标分数由裁判模型生成，可能因模型输出和网络环境产生小幅波动。
+开发阶段默认每种评价体系最多执行前10条，以控制在线模型调用量；将`case_limit`改为`null`后才会执行完整的67条标准RAG、25条边界行为和8条多轮上下文用例。
+
+### 历史10条基线结果
+
+以下数据来自扩充测试集之前的原10条RAG基线用例，不代表当前100条用例的全量结果，也不与新增的两类GEval分数混合计算。100条测试集必须实际完整运行后，分别记录三套评价体系的平均分。
 
 | 指标 | 平均分 |
 | --- | ---: |
@@ -130,9 +162,9 @@ conda run --no-capture-output -n Lang python -m pytest -q agent_test.py -k rag_q
 | Contextual Relevancy | 0.5361 |
 | Contextual Precision | 0.8167 |
 | Contextual Recall | 0.8667 |
-| 五项指标总体平均分 | 0.8207 |
+| 标准RAG五项指标总体平均分 | 0.8207 |
 
-评测结果显示，回答相关性与忠实度表现较好，当前主要优化方向是降低无关文本召回、提升上下文相关性。知识库边界用例用于验证 Agent 在资料不足时能否避免编造，因此不应只依据传统检索指标判断其业务行为是否正确。
+历史结果显示回答相关性与忠实度表现较好，主要优化方向是降低无关文本召回、提升上下文相关性。当前100条分层评测集及字段说明参见 `docs/evaluation_dataset.md`。
 
 ## 快速开始
 
@@ -191,7 +223,10 @@ LangChain-React/
 │   └── rag.yml                   # 模型、Embedding 与检索配置
 ├── data/
 │   ├── *.txt                     # AI 短剧/漫剧知识库
-│   └── test_cases.yml            # RAG 分层评测数据集
+│   ├── build_test_cases.py       # 100条分层评测集生成与一致性校验
+│   └── test_cases.yml            # 100条RAG/Agent分层评测用例
+├── docs/
+│   └── evaluation_dataset.md     # 评测分类、指标路由与多轮测试说明
 ├── model/
 │   └── factory.py                # Chat 与 Embedding 模型工厂
 ├── prompts/

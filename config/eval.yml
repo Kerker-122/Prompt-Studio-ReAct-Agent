@@ -1,7 +1,8 @@
 dataset_path: data/test_cases.yml
 
-# 正整数表示只评测前N条用例；改为null表示评测全部用例。
-case_limit: null
+# 正整数表示每种evaluation_profile只评测前N条；改为null表示评测全部用例。
+# 100条全量评测会产生大量模型调用，开发阶段默认抽取前10条。
+case_limit: 10
 
 thresholds:
   answer_relevancy: 0.5
@@ -9,3 +10,5 @@ thresholds:
   contextual_relevancy: 0.5
   contextual_precision: 0.5
   contextual_recall: 0.5
+  multi_turn_context: 0.5
+  boundary_behavior: 0.5

@@ -46,7 +46,8 @@ _codex/
 
 # 本地学习脚本与项目过程文档
 01Agent-Tiyan.py
-docs/
+docs/*
+!docs/evaluation_dataset.md
 
 # 临时文件
 *.tmp
