@@ -1,0 +1,11 @@
+dataset_path: data/test_cases.yml
+
+# 正整数表示只评测前N条用例；改为null表示评测全部用例。
+case_limit: null
+
+thresholds:
+  answer_relevancy: 0.5
+  faithfulness: 0.5
+  contextual_relevancy: 0.5
+  contextual_precision: 0.5
+  contextual_recall: 0.5

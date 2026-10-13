@@ -20,5 +20,10 @@ class EmbeddingFactory(BaseModelFactory):
     def generator(self)->Optional[Embeddings | BaseChatModel]:
         return DashScopeEmbeddings(model=rag_conf["embeddings_model_name"])
 
+class JudgeModelFactory(BaseModelFactory):
+    def generator(self)->Optional[Embeddings | BaseChatModel]:
+        return ChatTongyi(model=rag_conf["judge_model_name"])
+
 Chat_Model=ChatModelFactory().generator()
 Embeding_Model=EmbeddingFactory().generator()
+Judge_Model=JudgeModelFactory().generator()

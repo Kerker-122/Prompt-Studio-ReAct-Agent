@@ -15,6 +15,7 @@
 - RAG 知识库构建、检索与引用
 - 中间件与动态提示词切换
 - 多轮对话与会话隔离
+- DeepEval RAG 自动化质量评测
 - Streamlit 流式交互界面
 
 ## 效果展示
@@ -67,6 +68,7 @@
 | 多轮上下文 | 使用内存检查点保存同一会话的上下文，并通过 thread ID 隔离会话 |
 | 流式界面 | Streamlit 实时展示模型输出和工具执行状态 |
 | 模块化配置 | 模型、向量库、提示词和 Agent 参数统一通过 YAML 配置 |
+| RAG 自动化评测 | 使用 DeepEval 和 Qwen-Max 从检索与生成两个层面评估 RAG 质量 |
 
 ## Agent 工具
 
@@ -90,6 +92,47 @@
 | 前端界面 | Streamlit |
 | 配置管理 | YAML |
 | 运行环境 | Python、Conda |
+| 自动化评测 | DeepEval、Pytest、LLM-as-a-Judge |
+
+## RAG 质量评测
+
+项目使用 DeepEval 构建 RAG 离线自动化评测流程，并以 Qwen-Max 作为 LLM-as-a-Judge 裁判模型。测试脚本会调用真实的 ChromaDB 检索与 RAG 回答链路，再从检索质量和生成质量两个层面进行评价。
+
+| 指标 | 关注内容 |
+| --- | --- |
+| Answer Relevancy | 最终回答是否切题 |
+| Faithfulness | 回答是否忠于检索资料，是否存在无依据内容 |
+| Contextual Relevancy | 召回的文本与用户问题是否相关 |
+| Contextual Precision | 有价值的召回文本是否排在较前位置 |
+| Contextual Recall | 召回文本是否覆盖标准答案的关键知识点 |
+
+测试集位于 `data/test_cases.yml`，包含 8 条基础用例和 2 条综合/边界用例。`config/eval.yml` 用于配置测试集路径、指标阈值和参与评测的用例数量：
+
+```yaml
+dataset_path: data/test_cases.yml
+
+# 正整数表示只评测前N条；null表示评测全部用例。
+case_limit: null
+```
+
+运行评测：
+
+```powershell
+conda run --no-capture-output -n Lang python -m pytest -q agent_test.py -k rag_quality -s -p no:cacheprovider
+```
+
+当前 10 条用例的完整评测结果如下。指标分数由裁判模型生成，可能因模型输出和网络环境产生小幅波动。
+
+| 指标 | 平均分 |
+| --- | ---: |
+| Answer Relevancy | 0.9273 |
+| Faithfulness | 0.9566 |
+| Contextual Relevancy | 0.5361 |
+| Contextual Precision | 0.8167 |
+| Contextual Recall | 0.8667 |
+| 五项指标总体平均分 | 0.8207 |
+
+评测结果显示，回答相关性与忠实度表现较好，当前主要优化方向是降低无关文本召回、提升上下文相关性。知识库边界用例用于验证 Agent 在资料不足时能否避免编造，因此不应只依据传统检索指标判断其业务行为是否正确。
 
 ## 快速开始
 
@@ -143,9 +186,12 @@ LangChain-React/
 ├── config/
 │   ├── agent.yml                 # Agent 与会话配置
 │   ├── chroma.yml                # ChromaDB 配置
+│   ├── eval.yml                  # DeepEval 测试集、阈值和数量配置
 │   ├── prompts.yml               # 提示词文件路径
 │   └── rag.yml                   # 模型、Embedding 与检索配置
-├── data/                         # AI 短剧/漫剧 TXT 知识库
+├── data/
+│   ├── *.txt                     # AI 短剧/漫剧知识库
+│   └── test_cases.yml            # RAG 分层评测数据集
 ├── model/
 │   └── factory.py                # Chat 与 Embedding 模型工厂
 ├── prompts/
@@ -157,6 +203,7 @@ LangChain-React/
 │   └── vector_store.py           # 文档入库、增量更新与向量查询
 ├── utils/                        # 配置、路径、文件、日志和提示词工具
 ├── app.py                        # Streamlit 应用入口
+├── agent_test.py                 # DeepEval RAG 自动化评测脚本
 ├── requirements.txt              # Python 依赖
 └── README.md
 ```
@@ -171,5 +218,6 @@ LangChain-React/
 | `config/chroma.yml` | 向量库目录与集合名称 |
 | `config/prompts.yml` | 三类提示词文件的路径 |
 | `config/agent.yml` | Agent 行为和默认 thread ID |
+| `config/eval.yml` | DeepEval 测试集路径、指标阈值和执行用例数量 |
 
 更换模型时，优先修改 `config/rag.yml`，同时确认新模型与当前百炼账号及 SDK 兼容。

@@ -25,6 +25,7 @@ chroma_db/
 md5_*.txt
 
 # 测试与工具缓存
+.deepeval/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

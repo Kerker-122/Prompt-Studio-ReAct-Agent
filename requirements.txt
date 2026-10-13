@@ -26,5 +26,9 @@ pyyaml==6.0.2
 # 阿里云百炼模型
 dashscope==1.27.7
 
+# RAG自动化评测
+deepeval==4.2.8
+pytest==9.1.1
+
 # Streamlit 与 Google API 依赖的共同兼容版本
 protobuf==6.33.5
